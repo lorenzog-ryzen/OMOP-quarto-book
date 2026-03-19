@@ -1,0 +1,10 @@
+project:
+  type: book
+
+book:
+  title: "Mi proyecto OMOP"
+  author: "Lorenzo"
+  
+  chapters:
+    - index.md
+    - test.qmd

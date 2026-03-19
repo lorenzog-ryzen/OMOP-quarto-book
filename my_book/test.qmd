@@ -1,0 +1,293 @@
+---
+title: "Reporte OMOP"
+author: "Lorenzo Gutiérrez"
+format:
+  html:
+    toc: true
+    code-fold: true
+    theme: cosmo
+editor: visual
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+```{r echo=FALSE}
+library(DBI)
+library(RPostgres)
+library(dplyr)
+library(dbplyr)
+library(ggplot2)
+library(tidyr)
+library(scales)
+library(glue)
+library(janitor)
+
+db_host <- "172.22.4.150"
+db_port <- 5432
+db_name <- "OMOP"
+db_user <- "achilles_test_user"
+db_password <- "omop-vgp-for-achilles"
+
+con <- dbConnect(
+  RPostgres::Postgres(),
+  dbname = db_name,
+  host = db_host,
+  port = db_port,
+  user = db_user,
+  password = db_password
+)
+
+
+
+
+# Query SQL (el mismo de arriba)
+query_hipertension <- "
+WITH cohorte_hipertension AS (
+    SELECT DISTINCT
+        p.person_id,
+        p.gender_concept_id,
+        p.year_of_birth,
+        p.race_concept_id,
+        p.ethnicity_concept_id,
+        co.condition_occurrence_id,
+        co.condition_concept_id,
+        co.condition_source_value,
+        co.condition_start_date,
+        co.condition_end_date,
+        co.condition_type_concept_id,
+        co.visit_occurrence_id
+    FROM uninorte_omop.person p
+    INNER JOIN uninorte_omop.condition_occurrence co
+        ON p.person_id = co.person_id
+    WHERE 
+        co.condition_source_value = 'I10X'
+)
+
+SELECT 
+    person_id,
+    gender_concept_id,
+    year_of_birth,
+    EXTRACT(YEAR FROM CURRENT_DATE) - year_of_birth AS edad_actual,
+    race_concept_id,
+    ethnicity_concept_id,
+    COUNT(DISTINCT condition_occurrence_id) AS total_registros_hipertension,
+    MIN(condition_start_date) AS primera_fecha_diagnostico,
+    MAX(condition_start_date) AS ultima_fecha_diagnostico,
+    condition_source_value
+FROM cohorte_hipertension
+GROUP BY 
+    person_id,
+    gender_concept_id,
+    year_of_birth,
+    race_concept_id,
+    ethnicity_concept_id,
+    condition_source_value
+ORDER BY person_id;
+"
+
+# Ejecutar consulta y almacenar en dataframe constante
+COHORTE_HIPERTENSION <- dbGetQuery(con, query_hipertension)
+```
+
+## Análisis de Género en Cohorte de Hipertensión
+
+```{r}
+#| dpi: 300
+#| fig-width: 10
+#| fig-height: 7
+
+# Calcular proporción de género
+genero_proporcion <- COHORTE_HIPERTENSION %>%
+  group_by(gender_concept_id) %>%
+  summarise(
+    n = n_distinct(person_id),
+    .groups = 'drop'
+  ) %>%
+  mutate(
+    proporcion = n / sum(n),
+    porcentaje = round(proporcion * 100, 1),
+    genero = case_when(
+      gender_concept_id == 8507 ~ "Mujer",
+      gender_concept_id == 8532 ~ "Hombre",
+      TRUE ~ "Otro"
+    )
+  ) %>%
+  arrange(desc(n))
+
+# Visualizar con pie chart
+ggplot(genero_proporcion, aes(x = "", y = porcentaje, fill = genero)) +
+  geom_bar(stat = "identity", width = 1) +
+  coord_polar("y", start = 0) +
+  theme_void() +
+  theme(
+    legend.position = "right",
+    legend.text = element_text(size = 14),
+    legend.title = element_text(size = 15, face = "bold")
+  ) +
+  geom_text(aes(label = paste0(porcentaje, "%")), 
+            position = position_stack(vjust = 0.5),
+            size = 8, 
+            fontface = "bold",
+            color = "white") +
+  scale_fill_manual(values = c("Mujer" = "#FF6B9D", "Hombre" = "#4A90E2", "Otro" = "#F5A623")) +
+  labs(title = "Proporción de Género en Cohorte de Pacientes Hipertensivos",
+       fill = "Género") +
+  theme(plot.title = element_text(size = 18, face = "bold", hjust = 0.5, vjust = 2, margin = margin(b = 20)))
+
+# Mostrar tabla de resultados
+genero_proporcion %>%
+  select(genero, n, porcentaje) %>%
+  rename(
+    "Género" = genero,
+    "N Pacientes" = n,
+    "Porcentaje %" = porcentaje
+  ) %>%
+  knitr::kable()
+```
+
+## Distribución de Edades por Género
+
+```{r}
+#| dpi: 300
+#| fig-width: 10
+#| fig-height: 7
+
+# Preparar datos para el gráfico de violín
+datos_edades <- COHORTE_HIPERTENSION %>%
+  mutate(
+    genero = case_when(
+      gender_concept_id == 8507 ~ "Mujer",
+      gender_concept_id == 8532 ~ "Hombre",
+      TRUE ~ "Otro"
+    )
+  ) %>%
+  select(edad_actual, genero) %>%
+  drop_na()
+
+# Gráfico de violín por género
+ggplot(datos_edades, aes(x = genero, y = edad_actual, fill = genero)) +
+  geom_violin(alpha = 0.8, trim = FALSE) +
+  geom_boxplot(width = 0.2, alpha = 0.6, fill = "white") +
+  geom_jitter(width = 0.1, alpha = 0.3, size = 2) +
+  scale_fill_manual(values = c("Mujer" = "#FF6B9D", "Hombre" = "#4A90E2", "Otro" = "#F5A623")) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 18, face = "bold", hjust = 0.5, margin = margin(b = 20)),
+    axis.title = element_text(size = 14, face = "bold"),
+    axis.text = element_text(size = 12),
+    legend.position = "right",
+    legend.text = element_text(size = 12),
+    legend.title = element_text(size = 13, face = "bold"),
+    panel.grid.major.x = element_blank()
+  ) +
+  labs(
+    title = "Distribución de Edades por Género en Cohorte de Hipertensión",
+    x = "Género",
+    y = "Edad (años)",
+    fill = "Género"
+  )
+
+# Resumen estadístico por género
+resumen_edades <- datos_edades %>%
+  group_by(genero) %>%
+  summarise(
+    "N" = n(),
+    "Media" = round(mean(edad_actual, na.rm = TRUE), 1),
+    "Mediana" = round(median(edad_actual, na.rm = TRUE), 1),
+    "DE" = round(sd(edad_actual, na.rm = TRUE), 1),
+    "Mín" = min(edad_actual, na.rm = TRUE),
+    "Máx" = max(edad_actual, na.rm = TRUE),
+    .groups = 'drop'
+  )
+
+knitr::kable(resumen_edades, caption = "Resumen Estadístico de Edades por Género")
+```
+
+## Distribución por Grupos Etarios
+
+```{r}
+#| dpi: 300
+#| fig-width: 12
+#| fig-height: 7
+
+# Crear variable de grupo etario
+datos_grupos_etarios <- COHORTE_HIPERTENSION %>%
+  mutate(
+    grupo_etario = case_when(
+      edad_actual >= 0 & edad_actual <= 5 ~ "1ra infancia\n(0-5 años)",
+      edad_actual >= 6 & edad_actual <= 11 ~ "Infancia\n(6-11 años)",
+      edad_actual >= 12 & edad_actual <= 17 ~ "Adolescencia\n(12-17 años)",
+      edad_actual >= 18 & edad_actual <= 26 ~ "Juventud\n(18-26 años)",
+      edad_actual >= 27 & edad_actual <= 59 ~ "Adultez\n(27-59 años)",
+      edad_actual >= 60 ~ "Vejez\n(60+ años)",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(grupo_etario))
+
+# Contar pacientes únicos por grupo etario
+pacientes_por_grupo <- datos_grupos_etarios %>%
+  group_by(grupo_etario) %>%
+  summarise(
+    n_pacientes = n_distinct(person_id),
+    .groups = 'drop'
+  ) %>%
+  mutate(
+    grupo_etario = factor(grupo_etario, 
+      levels = c("1ra infancia\n(0-5 años)", 
+                 "Infancia\n(6-11 años)", 
+                 "Adolescencia\n(12-17 años)", 
+                 "Juventud\n(18-26 años)", 
+                 "Adultez\n(27-59 años)", 
+                 "Vejez\n(60+ años)"))
+  ) %>%
+  arrange(grupo_etario)
+
+# Barplot de pacientes por grupo etario
+ggplot(pacientes_por_grupo, aes(x = grupo_etario, y = n_pacientes, fill = grupo_etario)) +
+  geom_bar(stat = "identity", alpha = 0.8, color = "black", size = 0.8) +
+  geom_text(aes(label = n_pacientes), 
+            position = position_stack(vjust = 0.5),
+            size = 5, 
+            fontface = "bold",
+            color = "white") +
+  scale_fill_manual(
+    values = c(
+      "1ra infancia\n(0-5 años)" = "#FF69B4",
+      "Infancia\n(6-11 años)" = "#FF6B9D",
+      "Adolescencia\n(12-17 años)" = "#4A90E2",
+      "Juventud\n(18-26 años)" = "#50C878",
+      "Adultez\n(27-59 años)" = "#FFA500",
+      "Vejez\n(60+ años)" = "#8B4513"
+    )
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 18, face = "bold", hjust = 0.5, margin = margin(b = 20)),
+    axis.title = element_text(size = 14, face = "bold"),
+    axis.text.x = element_text(size = 12, face = "bold"),
+    axis.text.y = element_text(size = 12),
+    legend.position = "none",
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.y = element_blank()
+  ) +
+  labs(
+    title = "Distribución de Pacientes Hipertensivos por Grupo Etario",
+    x = "Grupo Etario",
+    y = "Número de Pacientes Únicos",
+    fill = "Grupo Etario"
+  )
+
+# Tabla resumen por grupo etario
+pacientes_por_grupo %>%
+  mutate(
+    "%" = round((n_pacientes / sum(n_pacientes)) * 100, 1)
+  ) %>%
+  rename(
+    "Grupo Etario" = grupo_etario,
+    "N Pacientes" = n_pacientes
+  ) %>%
+  knitr::kable(caption = "Distribución de Pacientes por Grupo Etario")
+```
